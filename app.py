@@ -27,12 +27,7 @@ def get_clients():
         st.error("⚠️ API keys not configured. Please add them to Streamlit secrets.")
         st.stop()
     
-    # Explicitly import and initialize to avoid parameter conflicts
-    import groq
-    groq_client = groq.Groq(api_key=groq_key)
-    tavily_client = TavilyClient(api_key=tavily_key)
-    
-    return groq_client, tavily_client
+    return Groq(api_key=groq_key), TavilyClient(api_key=tavily_key)
 
 def extract_text_from_pdf(pdf_file):
     """Extract text from uploaded PDF"""
