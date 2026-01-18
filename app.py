@@ -481,4 +481,5 @@ def main():
                     display_results(results, filename.replace('.pdf', ''))
 
 if __name__ == "__main__":
+
     main()
