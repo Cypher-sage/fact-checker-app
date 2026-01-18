@@ -18,7 +18,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# @st.cache_resource
+@st.cache_resource
 def get_clients():
     groq_key = st.secrets.get("GROQ_API_KEY", "")
     tavily_key = st.secrets.get("TAVILY_API_KEY", "")
@@ -416,6 +416,4 @@ def main():
             )
 
 if __name__ == "__main__":
-
     main()
-
