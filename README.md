@@ -20,7 +20,7 @@ This tool acts as a "Fact Checker" that sits between drafts and the publish butt
 
 ## 🚀 Live Demo
 
-**Try it here**: [fact-checker-aayushsikka.streamlit.app]
+**Try it here**: fact-checker-aayushsikka.streamlit.app
 
 ## 📸 Screenshots
 
