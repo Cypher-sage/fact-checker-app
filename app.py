@@ -33,7 +33,7 @@ def init_clients():
         st.session_state.tavily_client = TavilyClient(api_key=tavily_key)
         st.session_state.clients_initialized = True
 
-def call_groq_api(prompt, api_key, model="llama-3.1-8b-instant", max_retries=3):
+def call_groq_api(prompt, api_key, model="llama-3.3-70b-versatile", max_retries=3):
     """Call Groq API with retry logic and rate limit handling"""
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
@@ -89,25 +89,46 @@ def extract_text_from_pdf(pdf_file):
 
 def extract_claims(text, api_key):
     """Extract verifiable claims from text using Groq API"""
-    prompt = f"""Extract ALL verifiable factual claims from this document. Focus on:
-- Statistics with numbers (e.g., "GDP was -1.5%", "unemployment at 6.2%")
-- Financial data (stock prices, revenue, costs)
-- Technical specs (speeds, capacities)
-- Factual events (e.g., "economy entered recession")
+    prompt = f"""Extract EVERY verifiable factual claim from this document. Be COMPREHENSIVE and extract ALL claims.
 
-IGNORE: vague statements, opinions, predictions without data, date-only phrases.
+MUST EXTRACT (with specific numbers/data):
+- ALL statistics and percentages (e.g., "GDP was -1.5%", "unemployment at 6.2%", "grew by 25%")
+- ALL financial data (stock prices, revenue, market cap, costs, trading prices)
+- ALL technical specifications (speeds, capacities, dimensions, versions)
+- ALL factual events with specifics (e.g., "economy entered recession", "Starship Flight 11 failed")
+- ALL dates and timelines (e.g., "delayed to Q4 2026", "launched in October 2025")
+- ALL company/product status claims (e.g., "GPT-5 delayed", "Blue Origin secured contract")
+- ALL comparisons and rankings (e.g., "third consecutive failure")
+- ALL market conditions (e.g., "trading at $42,500", "ETF inflows negative")
 
-Return ONLY a JSON array (no markdown):
+IGNORE ONLY: pure opinions without facts, vague adjectives without data
+
+CRITICAL: Extract the COMPLETE claim with ALL context and numbers. Don't skip any factual statements.
+
+Examples of what to extract:
+✓ "Bitcoin (BTC) is trading sluggishly at roughly $42,500"
+✓ "struggling to break the $45k resistance level"
+✓ "ETF inflows have turned negative for the third consecutive quarter"
+✓ "OpenAI has officially delayed the release of GPT-5 indefinitely"
+✓ "GPT-4o remains their flagship model"
+✓ "Starship Flight 11, launched in October 2025, ended in a catastrophic failure"
+✓ "This marks the third consecutive failure for the program"
+✓ "Blue Origin has successfully secured the primary NASA contract"
+✓ "Real GDP growth for the full year 2025 closed at -1.5%"
+✓ "Unemployment has risen to 6.2%"
+✓ "regulatory crackdowns in the EU"
+
+Return ONLY a JSON array (no markdown, no backticks):
 [
   {{
-    "claim": "exact factual claim with numbers from document",
-    "type": "statistic|financial|technical|factual_statement",
-    "context": "brief context for verification"
+    "claim": "exact complete factual claim from document with all numbers and context",
+    "type": "statistic|financial|technical|factual_statement|comparison|market_data",
+    "context": "what this claim is specifically about"
   }}
 ]
 
-Document (first 6000 chars):
-{text[:6000]}"""
+Extract from this document - GET EVERY FACTUAL CLAIM:
+{text[:8000]}"""
 
     response = call_groq_api(prompt, api_key)
     if not response:
@@ -117,19 +138,22 @@ Document (first 6000 chars):
     
     try:
         claims = json.loads(response)
-        return claims if isinstance(claims, list) else []
+        # Filter out any empty or invalid claims
+        valid_claims = [c for c in claims if isinstance(c, dict) and c.get('claim') and len(c.get('claim', '')) > 10]
+        return valid_claims if isinstance(claims, list) else []
     except json.JSONDecodeError as e:
         st.error(f"Failed to parse claims: {str(e)[:100]}")
         return []
 
 def search_claim(claim_text, context, tavily_client):
-    """Search web for claim information"""
-    query = f"{claim_text} {context}"
+    """Search web for claim information with current date context"""
+    # Add year 2026 and "current" to get most recent data
+    query = f"{claim_text} {context} 2026 current latest"
     try:
         response = tavily_client.search(
             query, 
-            max_results=6,
-            search_depth="basic",
+            max_results=8,
+            search_depth="advanced",  # Changed to advanced for better results
             include_raw_content=False
         )
         return response.get('results', [])
@@ -138,48 +162,79 @@ def search_claim(claim_text, context, tavily_client):
         return []
 
 def verify_claim(claim, search_results, api_key):
-    """Verify claim against search results"""
+    """Verify claim against search results with strict accuracy checking"""
     if not search_results:
         return {
-            "status": "error",
-            "explanation": "No search results available",
-            "correct_info": "",
-            "confidence": "low",
+            "status": "false",
+            "explanation": "No search results found to verify this claim",
+            "correct_info": "Unable to find current information",
+            "confidence": "high",
             "sources": []
         }
     
     results_text = "\n\n".join([
-        f"Source {i+1}: {r.get('title', 'N/A')}\n{r.get('content', 'N/A')[:600]}"
-        for i, r in enumerate(search_results[:5])
+        f"Source {i+1} ({r.get('url', 'N/A')}):\nTitle: {r.get('title', 'N/A')}\nContent: {r.get('content', 'N/A')[:700]}"
+        for i, r in enumerate(search_results[:6])
     ])
     
-    prompt = f"""Verify this claim against web search results.
+    prompt = f"""You are a STRICT fact-checker. Verify this claim with HIGH PRECISION.
 
-CLAIM: "{claim['claim']}"
+CLAIM TO VERIFY: "{claim['claim']}"
 TYPE: {claim['type']}
+CONTEXT: {claim.get('context', 'N/A')}
 
-SEARCH RESULTS:
+WEB SEARCH RESULTS (Current, January 2026):
 {results_text}
 
-RULES:
-1. VERIFIED = Claim matches current sources (±2% for numbers)
-2. INACCURATE = Was true but now outdated/changed
-3. FALSE = Never accurate or fabricated
+STRICT VERIFICATION RULES - BE VERY PRECISE:
 
-Return ONLY JSON (no markdown):
+1. **VERIFIED** - Use ONLY if:
+   - Exact numbers match current sources (±1% tolerance max)
+   - Dates match exactly
+   - Facts are currently true as of January 2026
+   - Multiple authoritative sources confirm
+
+2. **INACCURATE** - Use if:
+   - Numbers are close but wrong (e.g., claim says "$42,500" but actual is "$95,000")
+   - Claim was true in the past but changed (e.g., "Bitcoin at $42K" but now $95K)
+   - Partially correct but missing key context
+   - Event happened but details are wrong
+
+3. **FALSE** - Use if:
+   - Numbers are completely wrong or fabricated
+   - Event never happened
+   - No credible sources support the claim
+   - Claim contradicts all search results
+   - Information appears to be made up
+
+CRITICAL INSTRUCTIONS:
+- Default to INACCURATE or FALSE if claim doesn't match current 2026 data
+- For financial/crypto claims: compare EXACT current prices from Jan 2026
+- For statistics: numbers must match within 1% or mark INACCURATE
+- For events: verify they actually happened as described
+- If search results show DIFFERENT numbers, the claim is INACCURATE or FALSE
+- Be SKEPTICAL - when in doubt, mark INACCURATE or FALSE
+
+EXAMPLES:
+- Claim: "Bitcoin is $42,500" | Search shows: "Bitcoin at $95,000" → FALSE (completely wrong)
+- Claim: "GDP was -1.5% in 2025" | Search shows: "GDP +2.8% in 2025" → FALSE (wrong number)
+- Claim: "Unemployment is 6.2%" | Search shows: "Unemployment 4.1%" → INACCURATE (outdated/wrong)
+- Claim: "GPT-5 delayed indefinitely" | Search shows: "GPT-5 released in Dec 2025" → FALSE
+
+Return ONLY valid JSON (no markdown, no backticks):
 {{
   "status": "verified|inaccurate|false",
-  "explanation": "Why claim matches/doesn't match sources",
-  "correct_info": "Current correct information if different",
+  "explanation": "Compare claim number vs actual: claim says [X] but sources show [Y]",
+  "correct_info": "The actual current figure/fact as of January 2026",
   "confidence": "high|medium|low",
-  "sources": ["{search_results[0].get('url', '')}"]
+  "sources": ["url1", "url2"]
 }}"""
 
-    response = call_groq_api(prompt, api_key)
+    response = call_groq_api(prompt, api_key, model="llama-3.3-70b-versatile")
     if not response:
         return {
             "status": "error",
-            "explanation": "Verification failed",
+            "explanation": "Verification failed - API error",
             "correct_info": "",
             "confidence": "low",
             "sources": []
@@ -191,11 +246,16 @@ Return ONLY JSON (no markdown):
         result = json.loads(response)
         result.setdefault('confidence', 'medium')
         result.setdefault('sources', [r.get('url', '') for r in search_results[:2]])
+        
+        # Ensure we have proper status
+        if result.get('status') not in ['verified', 'inaccurate', 'false', 'error']:
+            result['status'] = 'false'
+            
         return result
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
         return {
             "status": "error",
-            "explanation": "Could not parse verification",
+            "explanation": f"Could not parse verification response: {str(e)[:100]}",
             "correct_info": "",
             "confidence": "low",
             "sources": []
@@ -315,14 +375,14 @@ def main():
                                      claim.get('context', ''), 
                                      st.session_state.tavily_client)
         
-        time.sleep(1)  # Rate limit protection
+        time.sleep(1.5)  # Rate limit protection
         
         verification = verify_claim(claim, search_results, st.session_state.groq_api_key)
         
         results.append({**claim, **verification})
         progress_bar.progress((idx + 1) / len(claims))
         
-        time.sleep(2)  # Rate limit protection between claims
+        time.sleep(3)  # Increased delay between claims for rate limits
     
     status_text.empty()
     progress_bar.empty()
