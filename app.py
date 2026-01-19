@@ -1,5 +1,5 @@
 import streamlit as st
-from groq import Groq
+import requests
 from tavily import TavilyClient
 import PyPDF2
 import io
@@ -18,16 +18,49 @@ st.set_page_config(
     layout="wide"
 )
 
-@st.cache_resource
-def get_clients():
-    groq_key = st.secrets.get("GROQ_API_KEY", "")
-    tavily_key = st.secrets.get("TAVILY_API_KEY", "")
+def init_clients():
+    if 'clients_initialized' not in st.session_state:
+        groq_key = st.secrets.get("GROQ_API_KEY", "")
+        tavily_key = st.secrets.get("TAVILY_API_KEY", "")
+        
+        if not groq_key or not tavily_key:
+            st.error("⚠️ API keys not configured. Please add them to Streamlit secrets.")
+            st.stop()
+        
+        try:
+            st.session_state.groq_api_key = groq_key
+            st.session_state.tavily_client = TavilyClient(api_key=tavily_key)
+            st.session_state.clients_initialized = True
+        except Exception as e:
+            st.error(f"Error initializing clients: {str(e)}")
+            st.stop()
+
+def call_groq_api(prompt, api_key):
+    """Call Groq API directly using requests"""
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "temperature": 0,
+        "max_tokens": 4000
+    }
     
-    if not groq_key or not tavily_key:
-        st.error("⚠️ API keys not configured. Please add them to Streamlit secrets.")
-        st.stop()
+    response = requests.post(url, headers=headers, json=payload)
     
-    return Groq(api_key=groq_key), TavilyClient(api_key=tavily_key)
+    if response.status_code == 200:
+        return response.json()['choices'][0]['message']['content']
+    else:
+        st.error(f"Groq API error: {response.status_code} - {response.text}")
+        return None
 
 def extract_text_from_pdf(pdf_file):
     """Extract text from uploaded PDF"""
@@ -37,7 +70,7 @@ def extract_text_from_pdf(pdf_file):
         text += page.extract_text() + "\n"
     return text
 
-def extract_claims(text, client):
+def extract_claims(text, api_key):
     """Use Groq to extract verifiable claims from text"""
     prompt = f"""Analyze this document and extract ALL verifiable factual claims. Focus on:
 - Statistics and percentages (e.g., "grew by 25%", "unemployment at 3.5%", "GDP was -1.5%")
@@ -84,19 +117,10 @@ Return ONLY valid JSON array, no markdown:
 Document:
 {text[:8000]}"""
 
-    chat_completion = client.chat.completions.create(
-        messages=[
-            {
-                "role": "user",
-                "content": prompt,
-            }
-        ],
-        model="llama-3.3-70b-versatile",
-        temperature=0,
-        max_tokens=4000,
-    )
+    response_text = call_groq_api(prompt, api_key)
+    if not response_text:
+        return []
     
-    response_text = chat_completion.choices[0].message.content.strip()
     response_text = re.sub(r'```json\s*|\s*```', '', response_text).strip()
     
     try:
@@ -122,7 +146,7 @@ def search_claim(claim_text, context, tavily):
         st.warning(f"Search error: {e}")
         return []
 
-def verify_claim(claim, search_results, client):
+def verify_claim(claim, search_results, api_key):
     """Use Groq to verify claim against search results"""
     results_text = "\n\n".join([
         f"Source {i+1}: {r.get('url', 'N/A')}\nTitle: {r.get('title', 'N/A')}\nContent: {r.get('content', 'N/A')[:800]}"
@@ -173,19 +197,16 @@ Return ONLY valid JSON (no markdown, no explanation outside JSON):
   "sources": ["url1", "url2"]
 }}"""
 
-    chat_completion = client.chat.completions.create(
-        messages=[
-            {
-                "role": "user",
-                "content": prompt,
-            }
-        ],
-        model="llama-3.3-70b-versatile",
-        temperature=0,
-        max_tokens=1500,
-    )
+    response_text = call_groq_api(prompt, api_key)
+    if not response_text:
+        return {
+            "status": "error",
+            "explanation": "Could not verify claim",
+            "correct_info": "",
+            "confidence": "low",
+            "sources": []
+        }
     
-    response_text = chat_completion.choices[0].message.content.strip()
     response_text = re.sub(r'```json\s*|\s*```', '', response_text).strip()
     
     try:
@@ -276,6 +297,8 @@ def generate_pdf_report(results):
     return buffer
 
 def main():
+    init_clients()
+    
     st.title("🔍 Fact-Checking Web App")
     st.markdown("Upload a PDF to automatically verify claims against live web data")
     
@@ -300,8 +323,6 @@ def main():
     uploaded_file = st.file_uploader("Upload PDF Document", type=['pdf'])
     
     if uploaded_file:
-        groq_client, tavily_client = get_clients()
-        
         with st.spinner("📄 Extracting text from PDF..."):
             text = extract_text_from_pdf(uploaded_file)
             st.success(f"✅ Extracted {len(text)} characters from PDF")
@@ -311,7 +332,7 @@ def main():
         
         if st.button("🚀 Start Fact-Checking", type="primary"):
             with st.spinner("🔎 Extracting claims..."):
-                claims = extract_claims(text, groq_client)
+                claims = extract_claims(text, st.session_state.groq_api_key)
             
             if not claims:
                 st.warning("No verifiable claims found in document")
@@ -326,9 +347,9 @@ def main():
             for idx, claim in enumerate(claims):
                 status_text.text(f"Verifying claim {idx + 1}/{len(claims)}: {claim['claim'][:60]}...")
                 
-                search_results = search_claim(claim['claim'], claim['context'], tavily_client)
+                search_results = search_claim(claim['claim'], claim['context'], st.session_state.tavily_client)
                 
-                verification = verify_claim(claim, search_results, groq_client)
+                verification = verify_claim(claim, search_results, st.session_state.groq_api_key)
                 
                 results.append({
                     **claim,
@@ -373,13 +394,10 @@ def main():
                 
                 if status == 'verified':
                     emoji = "🟢"
-                    color = "green"
                 elif status == 'inaccurate':
                     emoji = "🟡"
-                    color = "orange"
                 else:
                     emoji = "🔴"
-                    color = "red"
                 
                 with st.container():
                     st.markdown(f"### {emoji} Claim #{idx + 1}: {status.upper()}")
